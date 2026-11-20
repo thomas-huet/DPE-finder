@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recherche par DPE</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css">
+<style>
+:root{
+  --bg:#f3f5f1; --surface:#ffffff; --text:#1d2a24; --muted:#5b6b62; --line:#d5dcd4;
+  --accent:#1f6f5c; --accent-text:#ffffff; --hl:#e4f1ec; --err:#a4332b;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#14191a; --surface:#1d2527; --text:#e6ece8; --muted:#9aaaa1; --line:#33403c;
+    --accent:#58c4a5; --accent-text:#0e1a16; --hl:#23372f; --err:#ff8a80; color-scheme: dark;
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:16px/1.5 "Source Sans 3","Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column}
+header{padding:16px 20px;border-bottom:1px solid var(--line);background:var(--surface)}
+h1{font:600 1.25rem/1.2 "Source Serif 4",Georgia,serif;margin:0 0 4px}
+header p{margin:0 0 12px;color:var(--muted);font-size:.9rem;max-width:70ch}
+form{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
+label{display:flex;flex-direction:column;font-size:.85rem;color:var(--muted);gap:4px}
+input{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:0;width:12rem}
+input[type=number]{width:11rem}
+input:focus-visible,button:focus-visible,li:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{font:600 1rem/1 inherit;font-family:inherit;background:var(--accent);color:var(--accent-text);border:0;border-radius:6px;padding:10px 18px;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+main{flex:1;min-height:0;display:grid;grid-template-columns:minmax(300px,380px) 1fr}
+#side{overflow:auto;border-right:1px solid var(--line);background:var(--surface)}
+#status{padding:12px 16px;color:var(--muted);font-size:.9rem}
+#status.error{color:var(--err)}
+ul{list-style:none;margin:0;padding:0}
+li{padding:12px 16px;border-top:1px solid var(--line);cursor:pointer}
+li:hover,li.active{background:var(--hl)}
+li .addr{font-weight:600}
+li .meta{color:var(--muted);font-size:.9rem}
+#map{min-height:320px}
+.maplibregl-popup-content{color:#1d2a24;font:14px/1.4 "Segoe UI",system-ui,sans-serif}
+@media (max-width:760px){
+  body{height:auto;min-height:100%}
+  main{grid-template-columns:1fr;grid-template-rows:55vh auto}
+  #map{order:-1}
+  #side{border-right:0}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Retrouver un bien à partir de son DPE</h1>
+  <p>Indiquez la ville et les deux valeurs inscrites sur l’étiquette énergie de l’annonce. Les résultats proviennent de la base ouverte des DPE de l’ADEME.</p>
+  <form id="form">
+    <label>Ville
+      <input id="city" name="city" value="Paris" required autocomplete="off">
+    </label>
+    <label>Consommation (kWh/m²/an)
+      <input id="conso" name="conso" type="number" step="1" min="0" required>
+    </label>
+    <label>Émissions (kg CO₂/m²/an)
+      <input id="ges" name="ges" type="number" step="1" min="0" required>
+    </label>
+    <button id="go" type="submit">Rechercher</button>
+  </form>
+</header>
+<main>
+  <section id="side" aria-live="polite">
+    <div id="status">Saisissez une ville et les deux valeurs pour voir les biens candidats.</div>
+    <ul id="list"></ul>
+  </section>
+  <div id="map" role="region" aria-label="Carte des biens candidats"></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.js"></script>
+<script>
+const API = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: "https://tiles.openfreemap.org/styles/liberty",
+  center: [2.35, 46.6], zoom: 4.5
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+let markers = [];
+
+// Lambert-93 (EPSG:2154) -> WGS84, used when the dataset gives no lat/lon
+function lambert93ToLonLat(x, y) {
+  const a = 6378137, e = 0.0818191910428158, d = Math.PI / 180;
+  const p0 = 46.5 * d, l0 = 3 * d, p1 = 44 * d, p2 = 49 * d, X0 = 700000, Y0 = 6600000;
+  const m = p => Math.cos(p) / Math.sqrt(1 - e * e * Math.sin(p) ** 2);
+  const t = p => Math.tan(Math.PI / 4 - p / 2) / (((1 - e * Math.sin(p)) / (1 + e * Math.sin(p))) ** (e / 2));
+  const n = Math.log(m(p1) / m(p2)) / Math.log(t(p1) / t(p2));
+  const F = m(p1) / (n * t(p1) ** n);
+  const r0 = a * F * t(p0) ** n;
+  const dx = x - X0, dy = y - Y0;
+  const r = Math.sign(n) * Math.hypot(dx, r0 - dy);
+  const th = Math.atan2(dx, r0 - dy);
+  const tt = (r / (a * F)) ** (1 / n);
+  let p = Math.PI / 2 - 2 * Math.atan(tt);
+  for (let i = 0; i < 8; i++)
+    p = Math.PI / 2 - 2 * Math.atan(tt * ((1 - e * Math.sin(p)) / (1 + e * Math.sin(p))) ** (e / 2));
+  return [(th / n + l0) / d, p / d];
+}
+
+function coords(r) {
+  if (r._geopoint) {
+    const [lat, lon] = String(r._geopoint).split(",").map(Number);
+    if (isFinite(lat) && isFinite(lon)) return [lon, lat];
+  }
+  const x = Number(r.coordonnee_cartographique_x_ban), y = Number(r.coordonnee_cartographique_y_ban);
+  if (isFinite(x) && isFinite(y) && x && y) return lambert93ToLonLat(x, y);
+  return null;
+}
+
+function setStatus(msg, err) { const s = $("status"); s.textContent = msg; s.className = err ? "error" : ""; }
+
+async function search(city, conso, ges) {
+  const url = new URL(API);
+  url.searchParams.set("nom_commune_ban_eq", city);
+  url.searchParams.set("conso_5_usages_par_m2_ep_eq", conso);
+  url.searchParams.set("emission_ges_5_usages_par_m2_eq", ges);
+  url.searchParams.set("size", "100");
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("L’API de l’ADEME a répondu avec le code " + res.status);
+  return res.json();
+}
+
+function render(rows) {
+  markers.forEach(m => m.remove()); markers = [];
+  const list = $("list"); list.innerHTML = "";
+  const bounds = new maplibregl.LngLatBounds();
+  rows.forEach((r, i) => {
+    const addr = r.adresse_ban || "Adresse non disponible";
+    const area = r.surface_habitable_logement;
+    const pos = coords(r);
+    const li = document.createElement("li");
+    li.tabIndex = 0;
+    li.innerHTML = `<div class="addr">${esc(addr)}</div><div class="meta">${area != null ? esc(area) + " m²" : "Surface inconnue"}${pos ? "" : " · position inconnue sur la carte"}</div>`;
+    list.appendChild(li);
+    let marker = null;
+    if (pos) {
+      const popup = new maplibregl.Popup({ offset: 24 }).setHTML(`<strong>${esc(addr)}</strong><br>${area != null ? esc(area) + " m²" : "Surface inconnue"}`);
+      marker = new maplibregl.Marker({ color: "#1f6f5c" }).setLngLat(pos).setPopup(popup).addTo(map);
+      markers.push(marker);
+      bounds.extend(pos);
+    }
+    const focus = () => {
+      list.querySelectorAll("li.active").forEach(e => e.classList.remove("active"));
+      li.classList.add("active");
+      if (pos) {
+        map.flyTo({ center: pos, zoom: 17 });
+        markers.forEach(m => m.getPopup().isOpen() && m.togglePopup());
+        marker.togglePopup();
+      }
+    };
+    li.addEventListener("click", focus);
+    li.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); focus(); } });
+    if (marker) marker.getElement().addEventListener("click", () => {
+      list.querySelectorAll("li.active").forEach(e => e.classList.remove("active"));
+      li.classList.add("active"); li.scrollIntoView({ block: "nearest" });
+    });
+  });
+  if (!bounds.isEmpty()) {
+    markers.length === 1
+      ? map.flyTo({ center: bounds.getCenter(), zoom: 17 })
+      : map.fitBounds(bounds, { padding: 60, maxZoom: 17 });
+  }
+}
+
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const city = $("city").value.trim(), conso = $("conso").value, ges = $("ges").value;
+  const q = new URLSearchParams({ city, conso, ges });
+  history.replaceState(null, "", "?" + q);
+  $("go").disabled = true; setStatus("Recherche en cours…");
+  try {
+    const data = await search(city, conso, ges);
+    const rows = data.results || [];
+    if (!rows.length) {
+      render([]);
+      setStatus("Aucun résultat. Vérifiez l’orthographe de la ville (correspondance exacte, par ex. « Montpellier ») et que les deux valeurs sont celles inscrites sur l’étiquette, en nombres entiers.", true);
+    } else {
+      render(rows);
+      const more = data.total > rows.length ? ` (${rows.length} premiers affichés)` : "";
+      setStatus(`${data.total} bien${data.total > 1 ? "s" : ""} candidat${data.total > 1 ? "s" : ""}${more}`);
+    }
+  } catch (err) {
+    setStatus("Échec de la recherche : " + err.message, true);
+  } finally { $("go").disabled = false; }
+});
+
+// Prefill from the URL, e.g. ?city=Montpellier&conso=406&ges=121
+const p = new URLSearchParams(location.search);
+if (p.get("city")) $("city").value = p.get("city");
+if (p.get("conso")) $("conso").value = p.get("conso");
+if (p.get("ges")) $("ges").value = p.get("ges");
+if (p.get("conso") && p.get("ges")) $("form").requestSubmit();
+</script>
+</body>
+</html>
