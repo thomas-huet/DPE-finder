@@ -52,8 +52,8 @@ li .meta{color:var(--muted);font-size:.9rem}
 </head>
 <body>
 <header>
-  <h1>Retrouver un bien à partir de son DPE</h1>
-  <p>Indiquez la ville et/ou le code postal (l’un des deux au moins), puis les deux valeurs inscrites sur l’étiquette énergie de l’annonce. La surface est facultative (tolérance de ±10 %). Les résultats proviennent de la base ouverte des DPE de l’ADEME.</p>
+  <h1>Retrouver un logement à partir de son DPE</h1>
+  <p>Indiquez la ville et/ou le code postal, puis les deux valeurs inscrites sur l’étiquette énergie de l’annonce. Les résultats proviennent de l’<a href="https://data.ademe.fr/datasets/dpe03existant">ADEME</a>.</p>
   <form id="form">
     <label>Ville
       <input id="city" name="city" autocomplete="off">
@@ -155,12 +155,12 @@ function details(r) {
   const area = r.surface_habitable_logement;
   const built = r.annee_construction
     ? "Construit en " + r.annee_construction
-    : r.periode_construction ? "Construction : " + r.periode_construction : null;
+    : r.periode_construction ? "Construction " + r.periode_construction : null;
   const has = v => v != null && v !== "";
   const floor = has(r.numero_etage_appartement)
     ? "Étage " + r.numero_etage_appartement + (has(r.nombre_niveau_immeuble) ? "/" + r.nombre_niveau_immeuble : "")
     : null;
-  const levels = Number(r.nombre_niveau_logement) > 1 ? "Logement sur " + r.nombre_niveau_logement + " niveaux" : null;
+  const levels = Number(r.nombre_niveau_logement) > 1 ? r.nombre_niveau_logement + " niveaux" : null;
   return [
     r.type_batiment ? String(r.type_batiment).replace(/^./, c => c.toUpperCase()) : null,
     built,
@@ -229,7 +229,7 @@ $("form").addEventListener("submit", async e => {
     const rows = data.results || [];
     if (!rows.length) {
       render([]);
-      setStatus("Aucun résultat. Vérifiez l’orthographe de la ville, le code postal et que les valeurs sont celles inscrites sur l’étiquette, en nombres entiers.", true);
+      setStatus("Aucun résultat. Vérifiez l’orthographe de la ville, le code postal et que les valeurs sont celles inscrites sur l’étiquette.", true);
     } else {
       render(rows);
       const more = data.total > rows.length ? ` (${rows.length} premiers affichés)` : "";
