@@ -27,6 +27,7 @@ form{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end}
 label{display:flex;flex-direction:column;font-size:.85rem;color:var(--muted);gap:4px}
 input{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:0;width:12rem}
 input[type=number]{width:11rem}
+input#cp{width:8rem}
 input:focus-visible,button:focus-visible,li:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{font:600 1rem/1 inherit;font-family:inherit;background:var(--accent);color:var(--accent-text);border:0;border-radius:6px;padding:10px 18px;cursor:pointer}
 button:disabled{opacity:.6;cursor:wait}
@@ -52,10 +53,13 @@ li .meta{color:var(--muted);font-size:.9rem}
 <body>
 <header>
   <h1>Retrouver un bien à partir de son DPE</h1>
-  <p>Indiquez la ville et les deux valeurs inscrites sur l’étiquette énergie de l’annonce. Les résultats proviennent de la base ouverte des DPE de l’ADEME.</p>
+  <p>Indiquez la ville et/ou le code postal (l’un des deux au moins), puis les deux valeurs inscrites sur l’étiquette énergie de l’annonce. La surface est facultative (tolérance de ±10 %). Les résultats proviennent de la base ouverte des DPE de l’ADEME.</p>
   <form id="form">
     <label>Ville
-      <input id="city" name="city" value="Paris" required autocomplete="off">
+      <input id="city" name="city" autocomplete="off">
+    </label>
+    <label>Code postal
+      <input id="cp" name="cp" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" autocomplete="off">
     </label>
     <label>Consommation (kWh/m²/an)
       <input id="conso" name="conso" type="number" step="1" min="0" required>
@@ -63,12 +67,15 @@ li .meta{color:var(--muted);font-size:.9rem}
     <label>Émissions (kg CO₂/m²/an)
       <input id="ges" name="ges" type="number" step="1" min="0" required>
     </label>
+    <label>Surface (m²)
+      <input id="area" name="area" type="number" step="any" min="1">
+    </label>
     <button id="go" type="submit">Rechercher</button>
   </form>
 </header>
 <main>
   <section id="side" aria-live="polite">
-    <div id="status">Saisissez une ville et les deux valeurs pour voir les biens candidats.</div>
+    <div id="status">Saisissez une ville ou un code postal, et les deux valeurs de l’étiquette, pour voir les biens candidats.</div>
     <ul id="list"></ul>
   </section>
   <div id="map" role="region" aria-label="Carte des biens candidats"></div>
@@ -119,32 +126,58 @@ function coords(r) {
 
 function setStatus(msg, err) { const s = $("status"); s.textContent = msg; s.className = err ? "error" : ""; }
 
-async function search(city, conso, ges) {
+const fix = n => (Math.round(n * 100) / 100).toFixed(2);
+
+// Label values are rounded integers: accept any dataset value that rounds to v
+function addRange(url, field, v) {
+  url.searchParams.set(field + "_gte", fix(v - 1 + 0.01));
+  url.searchParams.set(field + "_lte", fix(v + 0.99));
+}
+
+async function search({ city, cp, conso, ges, area }) {
   const url = new URL(API);
-  url.searchParams.set("nom_commune_ban_eq", city);
-  url.searchParams.set("conso_5_usages_par_m2_ep_eq", conso);
-  url.searchParams.set("emission_ges_5_usages_par_m2_eq", ges);
+  if (city) url.searchParams.set("nom_commune_ban_eq", city);
+  if (cp) url.searchParams.set("code_postal_ban_eq", cp);
+  addRange(url, "conso_5_usages_par_m2_ep", Number(conso));
+  addRange(url, "emission_ges_5_usages_par_m2", Number(ges));
+  if (area) {
+    url.searchParams.set("surface_habitable_logement_gte", fix(area * 0.9));
+    url.searchParams.set("surface_habitable_logement_lte", fix(area * 1.1));
+  }
   url.searchParams.set("size", "100");
   const res = await fetch(url);
   if (!res.ok) throw new Error("L’API de l’ADEME a répondu avec le code " + res.status);
   return res.json();
 }
 
+// Human-readable details shared by the list and the popup
+function details(r) {
+  const area = r.surface_habitable_logement;
+  const built = r.annee_construction
+    ? "Construit en " + r.annee_construction
+    : r.periode_construction ? "Construction : " + r.periode_construction : null;
+  return [
+    r.type_batiment ? String(r.type_batiment).replace(/^./, c => c.toUpperCase()) : null,
+    built,
+    area != null ? area + " m²" : "Surface inconnue"
+  ].filter(Boolean);
+}
+
 function render(rows) {
   markers.forEach(m => m.remove()); markers = [];
   const list = $("list"); list.innerHTML = "";
   const bounds = new maplibregl.LngLatBounds();
-  rows.forEach((r, i) => {
+  rows.forEach(r => {
     const addr = r.adresse_ban || "Adresse non disponible";
-    const area = r.surface_habitable_logement;
+    const info = details(r);
     const pos = coords(r);
     const li = document.createElement("li");
     li.tabIndex = 0;
-    li.innerHTML = `<div class="addr">${esc(addr)}</div><div class="meta">${area != null ? esc(area) + " m²" : "Surface inconnue"}${pos ? "" : " · position inconnue sur la carte"}</div>`;
+    li.innerHTML = `<div class="addr">${esc(addr)}</div><div class="meta">${esc(info.join(" · "))}${pos ? "" : " · position inconnue sur la carte"}</div>`;
     list.appendChild(li);
     let marker = null;
     if (pos) {
-      const popup = new maplibregl.Popup({ offset: 24 }).setHTML(`<strong>${esc(addr)}</strong><br>${area != null ? esc(area) + " m²" : "Surface inconnue"}`);
+      const popup = new maplibregl.Popup({ offset: 24 }).setHTML(`<strong>${esc(addr)}</strong><br>${info.map(esc).join("<br>")}`);
       marker = new maplibregl.Marker({ color: "#1f6f5c" }).setLngLat(pos).setPopup(popup).addTo(map);
       markers.push(marker);
       bounds.extend(pos);
@@ -174,16 +207,22 @@ function render(rows) {
 
 $("form").addEventListener("submit", async e => {
   e.preventDefault();
-  const city = $("city").value.trim(), conso = $("conso").value, ges = $("ges").value;
-  const q = new URLSearchParams({ city, conso, ges });
+  const f = {
+    city: $("city").value.trim(), cp: $("cp").value.trim(),
+    conso: $("conso").value, ges: $("ges").value, area: $("area").value
+  };
+  if (!f.city && !f.cp) { setStatus("Indiquez au moins une ville ou un code postal.", true); $("city").focus(); return; }
+  if (f.cp && !/^\d{5}$/.test(f.cp)) { setStatus("Le code postal doit comporter 5 chiffres.", true); $("cp").focus(); return; }
+  const q = new URLSearchParams();
+  Object.entries(f).forEach(([k, v]) => v && q.set(k, v));
   history.replaceState(null, "", "?" + q);
   $("go").disabled = true; setStatus("Recherche en cours…");
   try {
-    const data = await search(city, conso, ges);
+    const data = await search(f);
     const rows = data.results || [];
     if (!rows.length) {
       render([]);
-      setStatus("Aucun résultat. Vérifiez l’orthographe de la ville (correspondance exacte, par ex. « Montpellier ») et que les deux valeurs sont celles inscrites sur l’étiquette, en nombres entiers.", true);
+      setStatus("Aucun résultat. Vérifiez l’orthographe de la ville, le code postal et que les valeurs sont celles inscrites sur l’étiquette, en nombres entiers.", true);
     } else {
       render(rows);
       const more = data.total > rows.length ? ` (${rows.length} premiers affichés)` : "";
@@ -194,12 +233,9 @@ $("form").addEventListener("submit", async e => {
   } finally { $("go").disabled = false; }
 });
 
-// Prefill from the URL, e.g. ?city=Montpellier&conso=406&ges=121
 const p = new URLSearchParams(location.search);
-if (p.get("city")) $("city").value = p.get("city");
-if (p.get("conso")) $("conso").value = p.get("conso");
-if (p.get("ges")) $("ges").value = p.get("ges");
-if (p.get("conso") && p.get("ges")) $("form").requestSubmit();
+["city", "cp", "conso", "ges", "area"].forEach(k => { if (p.get(k)) $(k).value = p.get(k); });
+if ((p.get("city") || p.get("cp")) && p.get("conso") && p.get("ges")) $("form").requestSubmit();
 </script>
 </body>
 </html>
