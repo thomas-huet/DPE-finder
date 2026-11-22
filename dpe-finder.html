@@ -156,9 +156,16 @@ function details(r) {
   const built = r.annee_construction
     ? "Construit en " + r.annee_construction
     : r.periode_construction ? "Construction : " + r.periode_construction : null;
+  const has = v => v != null && v !== "";
+  const floor = has(r.numero_etage_appartement)
+    ? "Étage " + r.numero_etage_appartement + (has(r.nombre_niveau_immeuble) ? "/" + r.nombre_niveau_immeuble : "")
+    : null;
+  const levels = Number(r.nombre_niveau_logement) > 1 ? "Logement sur " + r.nombre_niveau_logement + " niveaux" : null;
   return [
     r.type_batiment ? String(r.type_batiment).replace(/^./, c => c.toUpperCase()) : null,
     built,
+    floor,
+    levels,
     area != null ? area + " m²" : "Surface inconnue"
   ].filter(Boolean);
 }
